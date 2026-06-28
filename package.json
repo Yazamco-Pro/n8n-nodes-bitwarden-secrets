@@ -45,9 +45,7 @@
   "peerDependencies": {
     "n8n-workflow": "*"
   },
-  "dependencies": {
-    "@bitwarden/sdk-napi": "^1.0.0"
-  },
+  "dependencies": {},
   "engines": {
     "node": ">=18.0.0"
   }
