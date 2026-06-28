@@ -36,21 +36,21 @@ interface SecretData {
 // SetLoggerError(()). We keep a single instance alive for the lifetime of the
 // process and authenticate fresh on every execute() call.
 
-let _sdkClient: BitwardenClient | null = null;
+let sdkClient: BitwardenClient | null = null;
 
 function getBitwardenClient(): BitwardenClient {
-	if (!_sdkClient) {
-		_sdkClient = new BitwardenClient(
+	if (!sdkClient) {
+		sdkClient = new BitwardenClient(
 			JSON.stringify({
 				apiUrl: 'https://api.bitwarden.com',
 				identityUrl: 'https://identity.bitwarden.com',
 				userAgent: 'n8n-bitwarden-secrets/0.1.0',
-				deviceType: 21, // DeviceType.SDK
+				deviceType: 21,
 			}),
 			LogLevel.Info,
 		);
 	}
-	return _sdkClient;
+	return sdkClient;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -153,7 +153,7 @@ export class BitwardenSecrets implements INodeType {
 		// ── Authenticate (once per execution) ────────────────────────────────────
 		try {
 			await runCommand(client, {
-				loginAccessToken: { accessToken },
+				accessTokenLogin: { accessToken },
 			});
 		} catch (authErr: unknown) {
 			const msg =

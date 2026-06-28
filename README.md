@@ -164,7 +164,7 @@ Enable **Continue On Fail** in node settings. Failed items output:
 | Access Token in errors | Error messages are sanitized — long base64-like strings replaced with `[REDACTED]` |
 | Access Token in node parameters | Never — always retrieved via `getCredentials()` |
 | Secret value in output | Only in normal n8n output; not logged |
-| WASM memory | Client instance freed via `client.free()` after each execution |
+| WASM client | Singleton — created once per Node.js process; never freed, so the WASM/Rust logger is not re-initialized |
 | Least-privilege | Use **Can read** permission on the Machine Account |
 
 ---
@@ -207,11 +207,14 @@ npm pack
 
 The node uses [`@bitwarden/sdk-wasm`](https://www.npmjs.com/package/@bitwarden/sdk-wasm) — Bitwarden's official WebAssembly SDK for Secrets Manager. The WASM binary is loaded synchronously from the npm package at module load time (no async init required in Node.js).
 
+Startup (once per Node.js process):
+- A `BitwardenClient` singleton is created with the Bitwarden cloud API/identity URLs.
+- The singleton is never freed — re-constructing it in the same process would reinitialize the WASM/Rust global logger and cause a `SetLoggerError(())` panic.
+
 For each workflow execution:
-1. A `BitwardenClient` instance is created with the Bitwarden cloud API/identity URLs.
-2. The Access Token is used to authenticate once per execution via the `loginAccessToken` command.
+1. The singleton client is retrieved (already initialized).
+2. The Access Token is used to authenticate via the `accessTokenLogin` command.
 3. Each input item triggers a `secrets.get` command to retrieve the specified secret by UUID.
-4. The client is freed from WASM memory after all items are processed.
 
 The SDK communicates via a JSON message-passing interface (`run_command`), which works identically on Alpine Linux, Debian, macOS, and Windows.
 
@@ -222,4 +225,5 @@ The SDK communicates via a JSON message-passing interface (`run_command`), which
 - **Read-only** — Get Secret by ID only.
 - **Cloud Bitwarden only** — hardcoded to `api.bitwarden.com` / `identity.bitwarden.com`. A future version could expose a `Server URL` credential field for self-hosted instances.
 - **No credential test button** — validates on first workflow run only.
-- **One SDK session per execution** — the client authenticates once and fetches all secrets in a single execution. Across executions there is no session reuse (by design — no credentials cached on disk).
+- **Singleton SDK client** — `BitwardenClient` is created once per Node.js process (not per execution). Authentication via `accessTokenLogin` runs on every execution so fresh credentials are used, but the underlying WASM instance is reused to avoid the global-logger panic.
+- **No cross-execution credential caching** — the Access Token is read from the n8n credential store on every execution; no tokens are persisted to disk.
