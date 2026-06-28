@@ -38,12 +38,15 @@ interface SecretData {
 
 let sdkClient: BitwardenClient | null = null;
 
-function getBitwardenClient(): BitwardenClient {
+// URLs are fixed from the first call — the WASM logger cannot be re-initialized
+// (re-constructing BitwardenClient panics with SetLoggerError). Self-hosted URLs
+// take effect on the first workflow execution after n8n starts.
+function getBitwardenClient(apiUrl: string, identityUrl: string): BitwardenClient {
 	if (!sdkClient) {
 		sdkClient = new BitwardenClient(
 			JSON.stringify({
-				apiUrl: 'https://api.bitwarden.com',
-				identityUrl: 'https://identity.bitwarden.com',
+				apiUrl,
+				identityUrl,
 				userAgent: 'n8n-bitwarden-secrets/0.1.0',
 				deviceType: 21,
 			}),
@@ -147,8 +150,15 @@ export class BitwardenSecrets implements INodeType {
 			);
 		}
 
+		const apiUrl =
+			(credentials.apiUrl as string | undefined)?.trim() ||
+			'https://api.bitwarden.com';
+		const identityUrl =
+			(credentials.identityUrl as string | undefined)?.trim() ||
+			'https://identity.bitwarden.com';
+
 		// ── SDK client (singleton) ───────────────────────────────────────────────
-		const client = getBitwardenClient();
+		const client = getBitwardenClient(apiUrl, identityUrl);
 
 		// ── Authenticate (once per execution) ────────────────────────────────────
 		try {
@@ -238,6 +248,7 @@ export class BitwardenSecrets implements INodeType {
 						id: secret.id ?? null,
 						key: secret.key ?? null,
 						value: secret.value ?? null,
+						note: secret.note ?? null,
 						projectId: secret.projectId ?? null,
 						creationDate: secret.creationDate ?? null,
 						revisionDate: secret.revisionDate ?? null,
