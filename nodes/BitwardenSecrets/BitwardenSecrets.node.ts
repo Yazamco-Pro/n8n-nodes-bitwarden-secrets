@@ -30,12 +30,31 @@ interface SecretData {
 	revisionDate?: string;
 }
 
+// ── Singleton client ──────────────────────────────────────────────────────────
+// The WASM SDK initializes a global logger inside the BitwardenClient constructor.
+// Constructing more than one instance in the same Node.js process panics with
+// SetLoggerError(()). We keep a single instance alive for the lifetime of the
+// process and authenticate fresh on every execute() call.
+
+let _sdkClient: BitwardenClient | null = null;
+
+function getBitwardenClient(): BitwardenClient {
+	if (!_sdkClient) {
+		_sdkClient = new BitwardenClient(
+			JSON.stringify({
+				apiUrl: 'https://api.bitwarden.com',
+				identityUrl: 'https://identity.bitwarden.com',
+				userAgent: 'n8n-bitwarden-secrets/0.1.0',
+				deviceType: 21, // DeviceType.SDK
+			}),
+			LogLevel.Info,
+		);
+	}
+	return _sdkClient;
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/**
- * Replace long base64-like strings and cap length so that tokens or encrypted
- * blobs never appear in user-visible error messages.
- */
 function sanitize(msg: string | undefined): string {
 	if (!msg) return 'Unknown error';
 	return msg
@@ -43,10 +62,6 @@ function sanitize(msg: string | undefined): string {
 		.substring(0, 500);
 }
 
-/**
- * Send a JSON command to the Bitwarden WASM client and return the response
- * data, throwing on any SDK-level error.
- */
 async function runCommand(
 	client: BitwardenClient,
 	command: object,
@@ -132,137 +147,125 @@ export class BitwardenSecrets implements INodeType {
 			);
 		}
 
-		// ── SDK client ────────────────────────────────────────────────────────────
-		// The WASM binary is loaded synchronously from disk when this module is first
-		// required. No async init() call is needed.
-		const client = new BitwardenClient(
-			JSON.stringify({
-				apiUrl: 'https://api.bitwarden.com',
-				identityUrl: 'https://identity.bitwarden.com',
-				userAgent: 'n8n-bitwarden-secrets/0.1.0',
-				deviceType: 21, // DeviceType.SDK
-			}),
-			LogLevel.Info,
-		);
+		// ── SDK client (singleton) ───────────────────────────────────────────────
+		const client = getBitwardenClient();
 
+		// ── Authenticate (once per execution) ────────────────────────────────────
 		try {
-			// ── Authenticate (once per execution) ─────────────────────────────────
-			try {
-				await runCommand(client, {
-					loginAccessToken: { accessToken },
-				});
-			} catch (authErr: unknown) {
-				const msg =
-					authErr instanceof Error ? authErr.message : String(authErr);
-				if (/unauthorized|401|invalid.*token|access.*denied/i.test(msg)) {
-					throw new NodeOperationError(
-						this.getNode(),
-						'Authentication failed. Verify the Access Token in the Bitwarden Secrets Manager API credential.',
-					);
-				}
+			await runCommand(client, {
+				loginAccessToken: { accessToken },
+			});
+		} catch (authErr: unknown) {
+			const msg =
+				authErr instanceof Error ? authErr.message : String(authErr);
+			if (/unauthorized|401|invalid.*token|access.*denied/i.test(msg)) {
 				throw new NodeOperationError(
 					this.getNode(),
-					`Failed to authenticate with Bitwarden Secrets Manager: ${sanitize(msg)}`,
+					'Authentication failed. Verify the Access Token in the Bitwarden Secrets Manager API credential.',
 				);
 			}
+			throw new NodeOperationError(
+				this.getNode(),
+				`Failed to authenticate with Bitwarden Secrets Manager: ${sanitize(msg)}`,
+			);
+		}
 
-			// ── Per-item secret retrieval ──────────────────────────────────────────
-			for (let i = 0; i < items.length; i++) {
+		// ── Per-item secret retrieval ─────────────────────────────────────────────
+		for (let i = 0; i < items.length; i++) {
+			try {
+				const rawId = this.getNodeParameter('secretId', i) as string;
+				const secretId = rawId?.trim();
+
+				if (!secretId) {
+					throw new NodeOperationError(
+						this.getNode(),
+						'Secret ID is required',
+						{ itemIndex: i },
+					);
+				}
+
+				if (!UUID_REGEX.test(secretId)) {
+					throw new NodeOperationError(
+						this.getNode(),
+						`Invalid Secret ID format: "${secretId}". ` +
+							'Expected a UUID like 2863ced6-eba1-48b4-b5c0-afa30104877a.',
+						{ itemIndex: i },
+					);
+				}
+
+				let rawData: unknown;
 				try {
-					const rawId = this.getNodeParameter('secretId', i) as string;
-					const secretId = rawId?.trim();
-
-					if (!secretId) {
+					rawData = await runCommand(client, {
+						secrets: { get: { id: secretId } },
+					});
+				} catch (fetchErr: unknown) {
+					const msg =
+						fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
+					if (/not.?found|404/i.test(msg)) {
 						throw new NodeOperationError(
 							this.getNode(),
-							'Secret ID is required',
+							`Secret not found: ${secretId}`,
 							{ itemIndex: i },
 						);
 					}
-
-					if (!UUID_REGEX.test(secretId)) {
+					if (/forbidden|403|unauthorized|permission/i.test(msg)) {
 						throw new NodeOperationError(
 							this.getNode(),
-							`Invalid Secret ID format: "${secretId}". ` +
-								'Expected a UUID like 2863ced6-eba1-48b4-b5c0-afa30104877a.',
+							`Permission denied for secret: ${secretId}. ` +
+								'Ensure the Machine Account has read access to the project.',
 							{ itemIndex: i },
 						);
 					}
+					throw new NodeOperationError(
+						this.getNode(),
+						`Failed to retrieve secret ${secretId}: ${sanitize(msg)}`,
+						{ itemIndex: i },
+					);
+				}
 
-					let rawData: unknown;
-					try {
-						rawData = await runCommand(client, {
-							secrets: { get: { id: secretId } },
-						});
-					} catch (fetchErr: unknown) {
-						const msg =
-							fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
-						if (/not.?found|404/i.test(msg)) {
-							throw new NodeOperationError(
-								this.getNode(),
-								`Secret not found: ${secretId}`,
-								{ itemIndex: i },
-							);
-						}
-						if (/forbidden|403|unauthorized|permission/i.test(msg)) {
-							throw new NodeOperationError(
-								this.getNode(),
-								`Permission denied for secret: ${secretId}. ` +
-									'Ensure the Machine Account has read access to the project.',
-								{ itemIndex: i },
-							);
-						}
-						throw new NodeOperationError(
-							this.getNode(),
-							`Failed to retrieve secret ${secretId}: ${sanitize(msg)}`,
-							{ itemIndex: i },
-						);
-					}
+				if (rawData == null) {
+					throw new NodeOperationError(
+						this.getNode(),
+						`Secret not found or empty response for: ${secretId}`,
+						{ itemIndex: i },
+					);
+				}
 
-					if (rawData == null) {
-						throw new NodeOperationError(
-							this.getNode(),
-							`Secret not found or empty response for: ${secretId}`,
-							{ itemIndex: i },
-						);
-					}
+				const secret = rawData as SecretData;
 
-					const secret = rawData as SecretData;
-
+				returnData.push({
+					json: {
+						id: secret.id ?? null,
+						key: secret.key ?? null,
+						value: secret.value ?? null,
+						projectId: secret.projectId ?? null,
+						creationDate: secret.creationDate ?? null,
+						revisionDate: secret.revisionDate ?? null,
+					},
+					pairedItem: { item: i },
+				});
+			} catch (itemErr: unknown) {
+				if (this.continueOnFail()) {
+					const msg =
+						itemErr instanceof NodeOperationError
+							? itemErr.message
+							: sanitize(
+									itemErr instanceof Error
+										? itemErr.message
+										: String(itemErr),
+								);
 					returnData.push({
-						json: {
-							id: secret.id ?? null,
-							key: secret.key ?? null,
-							value: secret.value ?? null,
-							projectId: secret.projectId ?? null,
-							creationDate: secret.creationDate ?? null,
-							revisionDate: secret.revisionDate ?? null,
-						},
+						json: { error: msg },
 						pairedItem: { item: i },
 					});
-				} catch (itemErr: unknown) {
-					if (this.continueOnFail()) {
-						const msg =
-							itemErr instanceof NodeOperationError
-								? itemErr.message
-								: sanitize(
-										itemErr instanceof Error
-											? itemErr.message
-											: String(itemErr),
-									);
-						returnData.push({
-							json: { error: msg },
-							pairedItem: { item: i },
-						});
-						continue;
-					}
-					throw itemErr;
+					continue;
 				}
+				throw itemErr;
 			}
-		} finally {
-			// Always release the WASM-backed client from memory.
-			client.free();
 		}
+
+		// The singleton client is intentionally not freed — it must stay alive
+		// so the WASM logger is not re-initialized on the next execute() call.
 
 		return [returnData];
 	}
