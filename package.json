@@ -23,7 +23,8 @@
     "dev": "tsc --watch",
     "lint": "eslint nodes credentials --ext .ts",
     "lintfix": "eslint nodes credentials --ext .ts --fix",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "deploy": "bash scripts/deploy.sh"
   },
   "files": [
     "dist"

@@ -1,2 +1,4 @@
 allowBuilds:
-  isolated-vm: set this to true or false
+  # Native addon pulled in transitively by n8n-workflow. Only types are needed
+  # here, so skip the compile.
+  isolated-vm: false
